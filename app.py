@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
-import sqlite3, os, urllib.parse
+import sqlite3, os, urllib.parse, re
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'change-this-secret-before-deploying')
@@ -22,6 +22,7 @@ def db():
 def init_db():
     with db() as con:
         con.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL)')
+        con.execute("CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, card_id INTEGER NOT NULL, utr TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending_review', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
 
 @app.context_processor
 def inject_user():
@@ -71,14 +72,27 @@ def logout():
 @app.route('/buy/<int:card_id>')
 def buy(card_id):
     if 'user_id' not in session:
-        flash('Please sign in before contacting us about an order.', 'error')
+        flash('Please sign in before starting an order.', 'error')
         return redirect(url_for('login'))
     card = next((c for c in CARDS if c['id'] == card_id), None)
     if not card:
         return redirect(url_for('home'))
-    msg = f"Hello! I am {session.get('username')}. I am interested in the {card['name']} ({card['kind']}) priced at ₹{card['price']}. Please share the details."
-    link = 'https://wa.me/' + WHATSAPP_NUMBER + '?text=' + urllib.parse.quote(msg)
-    return redirect(link)
+    return render_template('checkout.html', card=card)
+
+@app.route('/payment/submit/<int:card_id>', methods=['POST'])
+def submit_payment(card_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    card = next((c for c in CARDS if c['id'] == card_id), None)
+    utr = request.form.get('utr', '').strip()
+    if not card or not re.fullmatch(r'[A-Za-z0-9-]{8,30}', utr):
+        flash('Enter a valid UTR/reference number (8–30 letters or numbers).', 'error')
+        return redirect(url_for('buy', card_id=card_id))
+    with db() as con:
+        cur = con.execute('INSERT INTO orders (user_id, card_id, utr, status) VALUES (?, ?, ?, ?)',
+                           (session['user_id'], card_id, utr, 'pending_review'))
+        order_id = cur.lastrowid
+    return render_template('order_pending.html', card=card, order_id=order_id, utr=utr)
 
 if __name__ == '__main__':
     init_db()
